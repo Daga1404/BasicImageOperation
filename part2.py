@@ -6,7 +6,7 @@ import time
 # =========================================================
 # CONFIGURATION
 # =========================================================
-RTSP_URL = "rtsp://10.43.41.58:8554/stream"
+RTSP_URL = "rtsp://192.168.1.9:8554/stream"
 
 # Canny edge thresholds
 CANNY_LOW = 50
@@ -20,13 +20,11 @@ HOUGH_LINE_THRESHOLD = 80       # votes needed to keep a line
 HOUGH_LINE_MIN_LEN   = 60       # minimum line segment length (px)
 HOUGH_LINE_MAX_GAP   = 10       # max gap between segments to join
 
-HOUGH_CIRCLE_MIN_DIST = 40      # min distance between circle centers
-HOUGH_CIRCLE_PARAM1   = 100     # Canny upper threshold inside HoughCircles
-HOUGH_CIRCLE_PARAM2   = 30      # accumulator threshold (lower = more detections)
-HOUGH_CIRCLE_MIN_R    = 10
-HOUGH_CIRCLE_MAX_R    = 200
-
 POLY_AREA_MIN = 500             # discard tiny contours
+
+# Circle / ellipse detection (contour-based)
+CIRCULARITY_THRESH  = 0.72      # 4π·area/perimeter² ≥ this → treat as round shape
+ELLIPSE_AXIS_RATIO  = 0.85      # minor/major ≥ this → "Circle", else "Ellipse"
 
 # Colors for shape annotations (BGR)
 COLOR_LINE    = (0, 0, 255)     # red
@@ -124,7 +122,7 @@ def poly_label(n):
 
 
 def build_shape_overlay(frame):
-    """Grayscale frame with detected lines, circles and polygons annotated."""
+    """Grayscale frame with detected lines, circles, ellipses and polygons annotated."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
@@ -143,35 +141,39 @@ def build_shape_overlay(frame):
         for x1, y1, x2, y2 in lines[:, 0]:
             cv2.line(display, (x1, y1), (x2, y2), COLOR_LINE, 2)
 
-    # --- Circles (HoughCircles) ---
-    circles = cv2.HoughCircles(
-        blurred,
-        cv2.HOUGH_GRADIENT,
-        dp=1,
-        minDist=HOUGH_CIRCLE_MIN_DIST,
-        param1=HOUGH_CIRCLE_PARAM1,
-        param2=HOUGH_CIRCLE_PARAM2,
-        minRadius=HOUGH_CIRCLE_MIN_R,
-        maxRadius=HOUGH_CIRCLE_MAX_R
-    )
-    if circles is not None:
-        for cx, cy, r in np.round(circles[0]).astype(int):
-            cv2.circle(display, (cx, cy), r, COLOR_CIRCLE, 2)
-            cv2.circle(display, (cx, cy), 3, COLOR_CIRCLE, -1)
-
-    # --- Polygons (contour approximation) ---
+    # --- Circles, Ellipses and Polygons (unified contour pass) ---
+    # Circularity = 4π·area / perimeter²  →  1.0 for a perfect circle.
+    # Contours above CIRCULARITY_THRESH are fitted with an ellipse and labelled;
+    # the rest go through the usual polygon-approximation path.
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for cnt in contours:
-        if cv2.contourArea(cnt) < POLY_AREA_MIN:
+        area = cv2.contourArea(cnt)
+        if area < POLY_AREA_MIN:
             continue
         peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-        n = len(approx)
-        if 3 <= n <= 10:
-            cv2.drawContours(display, [approx], -1, COLOR_POLY, 2)
-            x, y, w, h = cv2.boundingRect(approx)
-            cv2.putText(display, poly_label(n), (x, y - 6),
+        if peri == 0:
+            continue
+
+        circularity = 4 * np.pi * area / (peri * peri)
+
+        if circularity >= CIRCULARITY_THRESH and len(cnt) >= 5:
+            # Fit a true ellipse to the contour points
+            ellipse = cv2.fitEllipse(cnt)
+            (_, _), (major_ax, minor_ax), _ = ellipse
+            axis_ratio = min(major_ax, minor_ax) / max(major_ax, minor_ax) if max(major_ax, minor_ax) > 0 else 0
+            label = "Circle" if axis_ratio >= ELLIPSE_AXIS_RATIO else "Ellipse"
+            cv2.ellipse(display, ellipse, COLOR_CIRCLE, 2)
+            x, y, w, h = cv2.boundingRect(cnt)
+            cv2.putText(display, label, (x, y - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_LABEL, 1)
+        else:
+            approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
+            n = len(approx)
+            if 3 <= n <= 10:
+                cv2.drawContours(display, [approx], -1, COLOR_POLY, 2)
+                x, y, w, h = cv2.boundingRect(approx)
+                cv2.putText(display, poly_label(n), (x, y - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_LABEL, 1)
 
     return display
 

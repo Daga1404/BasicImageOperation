@@ -22,9 +22,9 @@ import os
 # ──────────────────────────────────────────────
 IMAGE_DIR = "."   # Carpeta donde están las imágenes
 IMAGE_NAMES = [
-    "road0.png", "road1.png", "road103.png", "road105.png",
-    "road106.png", "road108.png", "road109.png",
-    "road111.png", "road112.png", "road116.png",
+    "road5.png", "road461.png", "road191.png", "road6.png", "road43.png", "road44.png", "road162.png",
+    "road212.png", "road260.png", "road293.png"
+
 ]
 
 GRAY_THRESHOLD   = 127   # Umbral para binarización en grises (0-255)

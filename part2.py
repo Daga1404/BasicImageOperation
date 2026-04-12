@@ -26,6 +26,14 @@ POLY_AREA_MIN = 500             # discard tiny contours
 CIRCULARITY_THRESH  = 0.72      # 4π·area/perimeter² ≥ this → treat as round shape
 ELLIPSE_AXIS_RATIO  = 0.85      # minor/major ≥ this → "Circle", else "Ellipse"
 
+# High-sided polygon vs circle disambiguation
+# For a regular n-gon the interior angle = (n-2)*180/n:
+#   octagon → 135°, decagon → 144°, 12-gon → 150°
+# A circle approximated by approxPolyDP has near-flat "corners" (≈ 170–178°).
+# If the *minimum* corner angle across all vertices is below this threshold the
+# shape is treated as a real polygon; otherwise it is classified as a circle/ellipse.
+POLYGON_MAX_CORNER_ANGLE = 160  # degrees
+
 # Colors for shape annotations (BGR)
 COLOR_LINE    = (0, 0, 255)     # red
 COLOR_CIRCLE  = (255, 0, 0)     # blue
@@ -116,9 +124,30 @@ def build_edge_overlay(frame):
     return display
 
 
+def min_corner_angle(approx):
+    """Return the minimum interior angle (degrees) at any vertex of the polygon.
+
+    Real polygon corners are sharp (well below 180°).
+    Points sampled from a smooth circle curve are near-flat (≈ 170–178°).
+    """
+    pts = approx[:, 0, :].astype(float)
+    n = len(pts)
+    min_angle = 180.0
+    for i in range(n):
+        a = pts[(i - 1) % n] - pts[i]
+        b = pts[(i + 1) % n] - pts[i]
+        denom = np.linalg.norm(a) * np.linalg.norm(b)
+        if denom == 0:
+            continue
+        cos_val = np.clip(np.dot(a, b) / denom, -1.0, 1.0)
+        min_angle = min(min_angle, np.degrees(np.arccos(cos_val)))
+    return min_angle
+
+
 def poly_label(n):
     return {3: "Triangle", 4: "Quadrilateral", 5: "Pentagon",
-            6: "Hexagon"}.get(n, f"{n}-gon")
+            6: "Hexagon", 7: "Heptagon", 8: "Octagon",
+            9: "Nonagon", 10: "Decagon"}.get(n, f"{n}-gon")
 
 
 def build_shape_overlay(frame):
@@ -141,39 +170,85 @@ def build_shape_overlay(frame):
         for x1, y1, x2, y2 in lines[:, 0]:
             cv2.line(display, (x1, y1), (x2, y2), COLOR_LINE, 2)
 
-    # --- Circles, Ellipses and Polygons (unified contour pass) ---
-    # Circularity = 4π·area / perimeter²  →  1.0 for a perfect circle.
-    # Contours above CIRCULARITY_THRESH are fitted with an ellipse and labelled;
-    # the rest go through the usual polygon-approximation path.
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for cnt in contours:
+    # --- Circles, Ellipses and Polygons ---
+    # RETR_TREE gives the full parent/child hierarchy so we can:
+    #   (a) detect shapes nested inside other shapes, and
+    #   (b) suppress duplicate labels (e.g. both edges of a ring → same label).
+    contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return display
+
+    # Pass 1 — classify every contour; store result by index.
+    # Each entry is (label, draw_kind, draw_arg) or None if the contour is skipped.
+    classifications = {}
+    for i, cnt in enumerate(contours):
         area = cv2.contourArea(cnt)
         if area < POLY_AREA_MIN:
+            classifications[i] = None
             continue
         peri = cv2.arcLength(cnt, True)
         if peri == 0:
+            classifications[i] = None
             continue
 
         circularity = 4 * np.pi * area / (peri * peri)
 
-        if circularity >= CIRCULARITY_THRESH and len(cnt) >= 5:
-            # Fit a true ellipse to the contour points
+        # Coarse approximation for polygon classification.
+        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+        n = len(approx)
+
+        # Fine approximation to distinguish circles from high-sided polygons.
+        # Real polygon sides are already straight, so vertex count stays the same
+        # regardless of epsilon.  A circle's curved edges produce many more vertices
+        # at fine tolerance (≈13–16 for 0.005·peri) while an octagon stays at 8.
+        approx_fine = cv2.approxPolyDP(cnt, 0.005 * peri, True)
+        n_fine = len(approx_fine)
+
+        is_round = (
+            circularity >= CIRCULARITY_THRESH
+            and len(cnt) >= 5
+            and n_fine > 12
+        )
+
+        if is_round:
             ellipse = cv2.fitEllipse(cnt)
             (_, _), (major_ax, minor_ax), _ = ellipse
             axis_ratio = min(major_ax, minor_ax) / max(major_ax, minor_ax) if max(major_ax, minor_ax) > 0 else 0
             label = "Circle" if axis_ratio >= ELLIPSE_AXIS_RATIO else "Ellipse"
+            classifications[i] = (label, "ellipse", (ellipse, cnt))
+        elif 3 <= n <= 12:
+            classifications[i] = (poly_label(n), "poly", approx)
+        else:
+            classifications[i] = None
+
+    # Pass 2 — draw, suppressing any contour whose parent already carries the
+    # same label.  This removes the duplicate inner-edge label on rings while
+    # keeping differently-labelled inner shapes (e.g. triangle inside a circle).
+    for i, cnt in enumerate(contours):
+        entry = classifications.get(i)
+        if entry is None:
+            continue
+
+        label, kind, draw_arg = entry
+
+        parent_idx = hierarchy[0][i][3]  # -1 when there is no parent
+        if parent_idx != -1:
+            parent_entry = classifications.get(parent_idx)
+            if parent_entry is not None and parent_entry[0] == label:
+                continue  # duplicate of parent — skip
+
+        if kind == "ellipse":
+            ellipse, cnt_orig = draw_arg
             cv2.ellipse(display, ellipse, COLOR_CIRCLE, 2)
-            x, y, w, h = cv2.boundingRect(cnt)
+            x, y, w, h = cv2.boundingRect(cnt_orig)
             cv2.putText(display, label, (x, y - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_LABEL, 1)
-        else:
-            approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-            n = len(approx)
-            if 3 <= n <= 10:
-                cv2.drawContours(display, [approx], -1, COLOR_POLY, 2)
-                x, y, w, h = cv2.boundingRect(approx)
-                cv2.putText(display, poly_label(n), (x, y - 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_LABEL, 1)
+        else:  # poly
+            approx = draw_arg
+            cv2.drawContours(display, [approx], -1, COLOR_POLY, 2)
+            x, y, w, h = cv2.boundingRect(approx)
+            cv2.putText(display, label, (x, y - 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_LABEL, 1)
 
     return display
 

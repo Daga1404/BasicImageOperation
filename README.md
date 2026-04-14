@@ -130,7 +130,7 @@ All tunable parameters are at the top of `part2.py`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `RTSP_URL` | `"rtsp://192.168.1.9:8554/stream"` | RTSP stream address |
+| `RTSP_URL` | `"rtsp://"your-ip":8554/stream"` | RTSP stream address |
 | `CANNY_LOW` | `50` | Lower threshold for Canny edge detection |
 | `CANNY_HIGH` | `150` | Upper threshold for Canny edge detection |
 | `HOUGH_LINE_THRESHOLD` | `80` | Minimum votes for a line to be kept by HoughLinesP |
